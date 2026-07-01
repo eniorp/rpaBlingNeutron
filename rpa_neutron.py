@@ -1,30 +1,5 @@
-# -*- coding: utf-8 -*-
-"""
-RPA Bling - Atualizar/criar produtos a partir de Nota Fiscal de Entrada
-=======================================================================
 
-Fluxo automatizado:
-  1. Abre https://www.bling.com.br/
-  2. Clica em "Login" / "Acessar"
-  3. Digita o usuario (e-mail)
-  4. Solicita a senha via prompt (nao fica salva no codigo)
-  5. Faz login'
-  6. Abre o menu "Estoque"
-  7. Abre "Notas Fiscais de Entrada"
-  8. Clica na primeira nota fiscal da lista
-  9. Rola ate a secao "Itens da nota fiscal"
- 10. Clica no icone em forma de clips com o hint
-     "atualizar ou criar produtos a partir da nota"
-
-Como o DOM do Bling pode variar, cada passo tenta varias estrategias de
-seletor antes de falhar, e tudo e registrado no log para facilitar o ajuste.
-
-Uso:
-    python rpa_bling.py
-    python rpa_bling.py --headless        (sem janela - nao recomendado p/ login)
-    python rpa_bling.py --user outro@mail.com
-"""
-
+from datetime import datetime
 from selenium.webdriver.common.action_chains import ActionChains
 
 from selenium.webdriver.common.keys import Keys
@@ -47,7 +22,21 @@ from selenium.common.exceptions import (
     StaleElementReferenceException,
 )
 
-from posicaoCarimboPDF import clicar_espaco_em_branco_pdf
+import os
+import re
+import unicodedata
+
+import cv2
+import numpy as np
+import pytesseract
+
+from posicaoCarimboPDF import (
+    clicar_espaco_em_branco_pdf,
+    screenshot_para_numpy,
+    encontrar_area_pdf_na_tela,
+)
+from teste import encontrar_imagem_em_png
+from verificaTemAprovado import tem_aprovado
 
 # --------------------------------------------------------------------------- #
 # Configuracao
@@ -55,6 +44,29 @@ from posicaoCarimboPDF import clicar_espaco_em_branco_pdf
 URL_NEUTRON = "https://neutron.ufenesp.com.br/Neutron/nclienteweb/Account/Login"
 USUARIO_PADRAO = "enio.silveira"
 TIMEOUT = 30  # segundos para esperas explicitas
+
+# Caminho do executavel do Tesseract-OCR (necessario para o reconhecimento da
+# palavra "APROVADO" no recorte do PDF). Pode ser sobrescrito pela variavel de
+# ambiente TESSERACT_CMD. Se nao informado, usa o que estiver no PATH.
+TESSERACT_CMD = os.environ.get("TESSERACT_CMD")
+if not TESSERACT_CMD:
+    for _cand in (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+    ):
+        if os.path.isfile(_cand):
+            TESSERACT_CMD = _cand
+            break
+if TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+# Idioma do OCR e pasta de "traineddata". Se existir uma pasta ./tessdata ao
+# lado do script (com por.traineddata baixado), ela e usada via --tessdata-dir.
+# O idioma "por" e o preferido; se nao estiver disponivel, cai para "eng"
+# (a palavra "aprovado" usa apenas letras latinas comuns).
+OCR_LANG = os.environ.get("OCR_LANG", "por")
+_TESSDATA_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tessdata")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -266,7 +278,8 @@ def passo_duplo_clique_tarefas(driver):
                 #    log.warning(f"Linha {i} não existe mais, encerrando")
                 #    break
 
-                linha = linhas[0]
+                #linha = linhas[i]
+                linha = linhas[5]
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", linha)
 
                 # Move o iframe para fora do caminho antes de clicar
@@ -286,20 +299,44 @@ def passo_duplo_clique_tarefas(driver):
                     if (iframe) iframe.style.pointerEvents = 'auto';
                 """)
 
-                tempo = random.randint(10, 25 )
+                tempo = random.randint(5, 10 )
                 print(f'aguardando por {tempo} segundos..')
                 time.sleep(tempo)                
                 
                 passo_menu_abrirCarimbo(driver)
                 passo_selecionar_aprovado(driver)
                 #clicar_link_pdf(driver)
-                print('log 1')
-                
+                time.sleep(2)
+                if not palavra_presente(driver, debug=True,imagemCompara='identificacaoPdfNaPagina.png'):
+                    if not palavra_presente(driver, debug=True,imagemCompara='identificacaoPdfNaPagina1_1.png'):
+                       print('nao achou numeracao de paginas..')
+                       i = 1 + 1
+                       continue
+                print('achou numeracao de paginas..')
                 if (clicar_espaco_em_branco_pdf(driver, debug=True)):
-                   time.sleep(2)                
-                   passo_menu_salvar(driver)
+                   time.sleep(3)
+                   # So salva se a palavra APROVADO for encontrada no PDF.                   
+                   achouCarimbo = False
+                   while not achouCarimbo:
+                    if palavra_presente(driver, debug=True,imagemCompara='carimbo.png'):
+                       achouCarimbo = True
+                       print('salvou')                       
+                       
+                    elif palavra_presente(driver, debug=True,imagemCompara='carimboAlternativo.png'):
+                       achouCarimbo = True
+                       print('salvou - carimbo alternativo')
+                    elif palavra_presente(driver, debug=True,imagemCompara='carimboAlternativo1.png'):
+                       achouCarimbo = True
+                       print('salvou - carimbo alternativo 1')
+   
+                    else:
+                       print('não salvou..palavra APROVADO não encontrada no PDF..')
+                       input("Pressione ENTER para continuar...")
+                   time.sleep(3)
+                   if achouCarimbo:
+                     passo_menu_salvar(driver)    
                 else:
-                    print('não salvou..nao achou pdf na tela..')   
+                    print('não salvou..nao achou pdf na tela..')
                 
                 
                 #clicar_se_existir(driver, By.ID, "pageWidgetContainer1", offset_x_pct=0.80, offset_y_pct=0.85, timeout=15)
@@ -308,8 +345,8 @@ def passo_duplo_clique_tarefas(driver):
                    
 
                 total = len(buscar_linhas())
-                if i >= 2: 
-                    print('passou aki')
+                if i >= 8: 
+                    
                     break
 
 
@@ -414,7 +451,7 @@ def passo_aguardar_login(driver):
 def passo_menu_selecionarAprovado(driver):
     log.info("6) Abrindo menu 'Estoque'")
     seletores = [
-        # XPath real informado: 'Estoque' e uma <div> no header/nav
+        
         (By.XPATH, "/html/body/div[3]/div/div[2]/div/div[2]/div/div/div/div[1]/input")
         
     ]
@@ -487,7 +524,7 @@ def passo_selecionar_aprovado(driver):
 
 
 def passo_menu_salvar(driver):
-    log.info("6) Abrindo menu 'Estoque'")
+    
 
     seletores = [
         (By.XPATH, "/html/body/div[1]/div[1]/div[1]/div/button[10]")
@@ -512,7 +549,7 @@ def passo_menu_salvar(driver):
 
 
 def passo_menu_abrirCarimbo(driver):
-    log.info("6) Abrindo menu 'Estoque'")
+    
 
     seletores = [
         (By.XPATH, "//button[@data-element='salvaAnotacoesDocumento']"),
@@ -540,7 +577,7 @@ def passo_menu_abrirCarimbo(driver):
         raise
 
 def passo_menu_paraAnalise(driver):
-    log.info("6) Abrindo menu 'Estoque'")
+    log.info("6) Abrindo menu 'para Analise'")
     seletores = [
         # XPath real informado: 'Estoque' e uma <div> no header/nav
         (By.XPATH, "/html/body/table/tbody/tr/td[1]/div/table/tbody/tr/td/div/div[4]/div/div/div/div/div/div[2]/div/ul/li/form/h/input")
@@ -992,6 +1029,95 @@ def clicar_link_pdf(driver):
     driver.find_element(By.ID, "pageWidgetContainer1").click()
 
     log.info("Link clicado com sucesso")
+
+
+def _normalizar_texto(texto: str) -> str:
+    """Minusculas, sem acentos e sem caracteres nao alfanumericos (vira espaco)."""
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = texto.encode("ascii", "ignore").decode("ascii")
+    texto = texto.lower()
+    return re.sub(r"[^a-z0-9]+", " ", texto)
+
+
+def palavra_presente(driver, debug: bool = True, imagemCompara: str = '') -> bool:
+    """Verifica, via OCR, se a palavra 'APROVADO' aparece no recorte do PDF."""
+    try:
+        img = screenshot_para_numpy(driver)
+    except Exception as e:
+        log.warning("Falha ao capturar a tela para checar o carimbo: %s", e)
+        return False
+    
+    
+    # Mesma logica/etapa ja usada no programa para achar a area do PDF.
+    area = encontrar_area_pdf_na_tela(img)
+    x0, y0 = area['x'], area['y']
+    larg, alt = area['largura'], area['altura']
+
+    recorte = img[y0:y0 + alt, x0:x0 + larg]
+    nome = f"recorte_{datetime.now():%Y%m%d_%H%M%S}.png"
+    cv2.imwrite(nome, recorte)
+    
+    resultado = encontrar_imagem_em_png(nome,
+                                   imagemCompara,
+                                   limiar_confianca=0.6)
+    return resultado['encontrado']                                   
+
+
+    
+    if recorte.size == 0:
+        log.warning("Area do PDF vazia; nao foi possivel checar a palavra.")
+        return False
+    #return tem_aprovado(recorte,palavra=palavra)
+    # Pre-processamento leve: escala de cinza ampliada 2x. Deixamos o proprio
+    # Tesseract fazer a binarizacao interna (lida melhor com o texto branco do
+    # carimbo do que um threshold global). Tentamos a imagem normal e, so se
+    # necessario, a invertida (texto claro sobre fundo escuro).
+    cinza = cv2.cvtColor(recorte, cv2.COLOR_BGR2GRAY)
+    cinza = cv2.resize(cinza, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    invertido = cv2.bitwise_not(cinza)
+
+    # Monta o config do OCR: psm 3 (segmentacao automatica de pagina) e, se
+    # existir a pasta local com o por.traineddata, aponta o --tessdata-dir.
+    config_ocr = "--psm 3"
+    if os.path.isdir(_TESSDATA_LOCAL):
+        config_ocr += f' --tessdata-dir "{_TESSDATA_LOCAL}"'
+
+    for nome, imagem in (("normal", cinza), ("invertido", invertido)):
+        texto = None
+        for lang in (OCR_LANG, "eng"):
+            try:
+                texto = pytesseract.image_to_string(imagem, lang=lang, config=config_ocr)
+                break  # OCR funcionou com este idioma
+            except pytesseract.TesseractNotFoundError:
+                log.error(
+                    "Tesseract-OCR nao encontrado. Instale o binario e/ou defina "
+                    "a variavel de ambiente TESSERACT_CMD apontando para tesseract.exe."
+                )
+                return False
+            except pytesseract.TesseractError as e:
+                # Idioma indisponivel: tenta o proximo (ex.: 'por' -> 'eng').
+                log.warning("OCR com lang='%s' falhou (%s); tentando proximo idioma.", lang, e)
+                continue
+            except Exception as e:
+                log.warning("Falha no OCR (%s): %s", nome, e)
+                break
+
+        if texto is None:
+            continue
+        with open("resultado.txt", "w", encoding="utf-8") as arquivo:
+           arquivo.write(texto)
+        #if palavra in _normalizar_texto(texto):
+        if palavra in texto:
+            log.info(f"Palavra {palavra} encontrada no recorte (OCR %s).", nome)
+            if debug:
+                try:
+                    cv2.imwrite("debug_aprovado_ocr.png", imagem)
+                except Exception:
+                    pass
+            return True
+
+    log.info(f"Palavra {palavra} NAO encontrada no recorte do PDF.")
+    return False
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #

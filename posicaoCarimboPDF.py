@@ -63,8 +63,8 @@ def encontrar_area_pdf_na_tela(img: np.ndarray) -> dict:
 def encontrar_espaco_em_branco_no_recorte(
     img: np.ndarray,
     area_pdf: dict,
-    largura_min: int = 100,
-    altura_min: int = 40,
+    largura_min: int = 60,
+    altura_min: int = 20,
     preferir_lado: str = 'direita',   # 'direita' | 'esquerda' | 'qualquer'
     threshold_branco: int = 245,
     debug_path: str = None
@@ -203,20 +203,17 @@ def clicar_espaco_em_branco_pdf(
     debug: bool = True,
 ) -> bool:
     
-    print("📸 Capturando screenshot...")
-    img = screenshot_para_numpy(driver)
-    print("   Screenshot salvo em: /tmp/screenshot_debug.png")    
+    
+    img = screenshot_para_numpy(driver)    
     cv2.imwrite("/tmp/screenshot_debug.png", img)
     
     
-    print("🔍 Localizando painel do PDF na tela...")
     area_pdf = encontrar_area_pdf_na_tela(img)
-    print(f"   Área PDF: x={area_pdf['x']}, y={area_pdf['y']}, "
-          f"{area_pdf['largura']}x{area_pdf['altura']}px")
     
-    debug_path = "/tmp/debug_carimbo.png" if debug else None
+    debug_path = "debug_carimbo.png"
     
-    print("🔎 Buscando espaço em branco...")
+    time.sleep(1)
+    
     regiao = encontrar_espaco_em_branco_no_recorte(
         img, area_pdf,
         preferir_lado=preferir_lado,
@@ -227,6 +224,7 @@ def clicar_espaco_em_branco_pdf(
         print("❌ Sem espaço em branco — abortando.")
         return False
 
+   
     cx = regiao['centro_x_tela']
     cy = regiao['centro_y_tela']
     
@@ -243,9 +241,6 @@ def clicar_espaco_em_branco_pdf(
     cx_real = int(cx * escala_x)
     cy_real = int(cy * escala_y)
     
-    print(f"✅ Coordenadas screenshot: ({cx}, {cy})")
-    print(f"   Escala: {escala_x:.2f}x{escala_y:.2f}")
-    print(f"   Coordenadas tela real:  ({cx_real}, {cy_real})")
     
     # ── Clique via pyautogui (coordenadas absolutas da tela física) ───────
     pyautogui.moveTo(cx_real, cy_real, duration=0.3)

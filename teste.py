@@ -1,88 +1,161 @@
 import cv2
 import numpy as np
-from PIL import Image
-import io
 from pathlib import Path
+from typing import Tuple, Dict, Optional
 
-from posicaoCarimboPDF import encontrar_area_pdf_na_tela, encontrar_espaco_em_branco_no_recorte
-
-
-EXTENSOES_IMAGEM = {'.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tif', '.tiff'}
-
-def percorrer_imgs_encontrar_area_pdf(
-    dir_entrada: str = r"c:\temp\img",
-    dir_saida: str = r"c:\temp\img\resultado",
-    salvar_debug: bool = True,
-) -> list[dict]:
-    """
-    Percorre todas as imagens em dir_entrada e aplica encontrar_area_pdf_na_tela.
-    Retorna lista com nome do arquivo e área detectada.
-    """
-    pasta = Path(dir_entrada)
-    if not pasta.is_dir():
-        raise FileNotFoundError(f"Diretório não encontrado: {dir_entrada}")
-
-    if salvar_debug:
-        Path(dir_saida).mkdir(parents=True, exist_ok=True)
-
-    resultados = []
-    arquivos = sorted(
-        f for f in pasta.iterdir()
-        if f.is_file() and f.suffix.lower() in EXTENSOES_IMAGEM
-    )
-
-    if not arquivos:
-        print(f"Nenhuma imagem encontrada em {dir_entrada}")
-        return resultados
-
-    print(f"Processando {len(arquivos)} imagem(ns) em {dir_entrada}\n")
-
-    for arquivo in arquivos:
-        img = cv2.imread(str(arquivo))
-        if img is None:
-            print(f"⚠️  Não foi possível ler: {arquivo.name}")
-            continue
-
-        area_pdf = encontrar_area_pdf_na_tela(img)
-        resultado = {'arquivo': arquivo.name, 'area_pdf': area_pdf}
-        resultados.append(resultado)
-
-        print("🔎 Buscando espaço em branco...")
-        regiao = encontrar_espaco_em_branco_no_recorte(
-            img, area_pdf,
-            preferir_lado='direita',
-            debug_path=None
-        )
-        
-        
-        if regiao is None:
-            print("❌ Sem espaço em branco — abortando.",arquivo.name)
-            return False
-        else:
-            print('achou branco',arquivo.name,regiao)    
+def encontrar_imagem_em_png(
+    caminho_png: str, 
+    caminho_template: str, 
+    limiar_confianca: float = 0.8,
+    metodo: str = 'TM_CCOEFF_NORMED'
+) -> Dict[str, any]:
+    # Validar arquivos
     
-        cx = regiao['centro_x_tela']
-        cy = regiao['centro_y_tela']
+    if not Path(caminho_png).exists():
+        print('aqui')
+        raise FileNotFoundError(f"Arquivo PNG não encontrado: {caminho_png}")
+    if not Path(caminho_template).exists():
+        raise FileNotFoundError(f"Template não encontrado: {caminho_template}")
+    
+    # Carregar imagens
+    imagem_principal = cv2.imread(caminho_png)
+    template = cv2.imread(caminho_template)
+    
+    if imagem_principal is None:
+        raise ValueError(f"Não foi possível ler: {caminho_png}")
+    if template is None:
+        raise ValueError(f"Não foi possível ler: {caminho_template}")
+    
+    # Converter para escala de cinza (melhora o matching)
+    img_cinza = cv2.cvtColor(imagem_principal, cv2.COLOR_BGR2GRAY)
+    template_cinza = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    
+    # Validar dimensões
+    if template_cinza.shape[0] > img_cinza.shape[0] or \
+       template_cinza.shape[1] > img_cinza.shape[1]:
+        return {
+            'encontrado': False,
+            'confianca': 0.0,
+            'posicao': None,
+            'area': None,
+            'motivo': 'Template maior que a imagem principal'
+        }
+    
+    # Selecionar método
+    metodos_disponiveis = {
+        'TM_CCOEFF_NORMED': cv2.TM_CCOEFF_NORMED,
+        'TM_SQDIFF_NORMED': cv2.TM_SQDIFF_NORMED,
+        'TM_CCORR_NORMED': cv2.TM_CCORR_NORMED,
+    }
+    
+    metodo_cv = metodos_disponiveis.get(metodo, cv2.TM_CCOEFF_NORMED)
+    
+    # Fazer template matching
+    resultado = cv2.matchTemplate(img_cinza, template_cinza, metodo_cv)
+    
+    # Encontrar melhor match
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(resultado)
+    
+    # Para TM_SQDIFF_NORMED, valores menores são melhores
+    if metodo == 'TM_SQDIFF_NORMED':
+        confianca = 1 - min_val
+        posicao = min_loc
+    else:
+        confianca = max_val
+        posicao = max_loc
+    
+    # Obter dimensões do template
+    altura_template, largura_template = template_cinza.shape
+    
+    # Verificar se confiança atende ao limiar
+    encontrado = confianca >= limiar_confianca
+    
+    return {
+        'encontrado': encontrado,
+        'confianca': round(confianca, 4),
+        'posicao': posicao if encontrado else None,
+        'area': (largura_template, altura_template),
+        'limiar_usado': limiar_confianca
+    }
 
 
-        print(f"📄 {arquivo.name}")
-        print(f"   Área PDF: x={area_pdf['x']}, y={area_pdf['y']}, "
-              f"{area_pdf['largura']}x{area_pdf['altura']}px")
+def encontrar_multiplas_imagens(
+    caminho_png: str,
+    caminho_template: str,
+    limiar_confianca: float = 0.8
+) -> Dict[str, any]:
+    """
+    Encontra TODAS as ocorrências de uma imagem dentro do PNG.
+    
+    Args:
+        caminho_png: Caminho do arquivo PNG principal
+        caminho_template: Caminho da imagem a ser procurada
+        limiar_confianca: Valor mínimo de confiança
+    
+    Returns:
+        Dict com lista de todas as ocorrências encontradas
+    """
+    
+    imagem_principal = cv2.imread(caminho_png)
+    template = cv2.imread(caminho_template)
+    
+    if imagem_principal is None or template is None:
+        raise ValueError("Erro ao carregar imagens")
+    
+    img_cinza = cv2.cvtColor(imagem_principal, cv2.COLOR_BGR2GRAY)
+    template_cinza = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    
+    resultado = cv2.matchTemplate(img_cinza, template_cinza, cv2.TM_CCOEFF_NORMED)
+    
+    # Encontrar todos os matches acima do limiar
+    localizacoes = np.where(resultado >= limiar_confianca)
+    
+    matches = []
+    altura_template, largura_template = template_cinza.shape
+    
+    for pt in zip(*localizacoes[::-1]):
+        confianca = resultado[pt[1], pt[0]]
+        matches.append({
+            'posicao': pt,
+            'confianca': round(float(confianca), 4),
+            'area': (largura_template, altura_template)
+        })
+    
+    return {
+        'total_encontrado': len(matches),
+        'matches': matches,
+        'limiar_usado': limiar_confianca
+    }
 
-        if salvar_debug:
-            debug = img.copy()
-            x, y = area_pdf['x'], area_pdf['y']
-            w, h = area_pdf['largura'], area_pdf['altura']
-            cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 200, 0), 3)
-            cv2.putText(debug, "PDF", (x + 10, y + 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 0), 2)
-            saida = Path(dir_saida) / f"area_{arquivo.stem}.png"
-            cv2.imwrite(str(saida), debug)
-            print(f"   Debug salvo em: {saida}")
 
-        print()
+#resultado = encontrar_imagem_em_png(
+#    "recorte1.png",
+#    "carimbo.png",
+#    limiar_confianca=0.3
+#)
 
-    return resultados
+#print(resultado)
+
+#resultado = encontrar_imagem_em_png(
+#    "recorte2.png",
+#    "identificacaoPdfNaPagina.png",
+#    limiar_confianca=0.3
+#)
 
 
-percorrer_imgs_encontrar_area_pdf(r'c:\temp\img', r'c:\temp\img\resultado', True)
+
+#resultado = encontrar_imagem_em_png(
+#    "recorte.png",
+#    "identificacaoPdfNaPagina.png",
+#    limiar_confianca=0.6
+#)
+#print(resultado)
+#
+#resultado = encontrar_imagem_em_png(
+#    "recorteManual.png",
+#    "identificacaoPdfNaPagina.png",
+#    limiar_confianca=0.6
+#)
+#print(resultado['encontrado'])
+
+# {'encontrado': True, 'confianca': 0.9234, 'posicao': (100, 50), ...}
